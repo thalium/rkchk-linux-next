@@ -5,24 +5,38 @@
  *
  * Sorted alphabetically.
  */
-
+// Instruction attribute analysis helper function
+#include <asm/inat.h>
+// In kernel disassembler
+#include <asm/insn.h>
+#include <asm/msr-index.h>
+#include <asm/syscall.h>
+#include <asm-generic/sections.h>
 #include <kunit/test.h>
+#include <linux/binfmts.h>
 #include <linux/blk-mq.h>
 #include <linux/blk_types.h>
 #include <linux/blkdev.h>
 #include <linux/cred.h>
+#include <linux/dirent.h>
 #include <linux/errname.h>
 #include <linux/ethtool.h>
 #include <linux/file.h>
 #include <linux/firmware.h>
+#include <linux/fprobe.h>
 #include <linux/fs.h>
+#include <linux/ftrace.h>
 #include <linux/jiffies.h>
 #include <linux/jump_label.h>
+#include <linux/kprobes.h>
+#include <linux/kallsyms.h>
 #include <linux/mdio.h>
+#include <linux/net.h>
 #include <linux/miscdevice.h>
 #include <linux/phy.h>
 #include <linux/pid_namespace.h>
 #include <linux/poll.h>
+#include <linux/preempt.h>
 #include <linux/refcount.h>
 #include <linux/sched.h>
 #include <linux/security.h>
@@ -42,4 +56,5 @@ const gfp_t RUST_CONST_HELPER_GFP_NOWAIT = GFP_NOWAIT;
 const gfp_t RUST_CONST_HELPER___GFP_ZERO = __GFP_ZERO;
 const gfp_t RUST_CONST_HELPER___GFP_HIGHMEM = ___GFP_HIGHMEM;
 const gfp_t RUST_CONST_HELPER___GFP_NOWARN = ___GFP_NOWARN;
-const blk_features_t RUST_CONST_HELPER_BLK_FEAT_ROTATIONAL = BLK_FEAT_ROTATIONAL;
+const blk_features_t RUST_CONST_HELPER_BLK_FEAT_ROTATIONAL =
+	BLK_FEAT_ROTATIONAL;

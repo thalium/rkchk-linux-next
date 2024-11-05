@@ -69,6 +69,12 @@ pub mod types;
 pub mod uaccess;
 pub mod workqueue;
 
+pub mod fprobe;
+pub mod insn;
+pub mod module;
+pub mod socket;
+pub mod task_iter;
+
 #[doc(hidden)]
 pub use bindings;
 pub use macros;
