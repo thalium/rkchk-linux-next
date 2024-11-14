@@ -2,11 +2,14 @@
 /*
  * PLL clock driver for the Mobileye EyeQ5, EyeQ6L and EyeQ6H platforms.
  *
- * This controller handles read-only PLLs, all derived from the same main
- * crystal clock. It also exposes divider clocks, those are children to PLLs.
- * Parent clock is expected to be constant. This driver's registers live in
- * a shared region called OLB. Some PLLs are initialised early by of_clk_init();
- * if so, two clk providers are registered.
+ * This controller handles:
+ *  - Read-only PLLs, all derived from the same main crystal clock.
+ *  - It also exposes divider clocks, those are children to PLLs.
+ *  - Fixed factor clocks, children to PLLs.
+ *
+ * Parent clock is expected to be constant. This driver's registers live in a
+ * shared region called OLB. Some PLLs and fixed-factors are initialised early
+ * by of_clk_init(); if so, two clk providers are registered.
  *
  * We use eqc_ as prefix, as-in "EyeQ Clock", but way shorter.
  *
@@ -86,12 +89,23 @@ struct eqc_div {
 	u8		width;
 };
 
+struct eqc_fixed_factor {
+	unsigned int	index;
+	const char	*name;
+	unsigned int	mult;
+	unsigned int	div;
+	unsigned int	parent;
+};
+
 struct eqc_match_data {
 	unsigned int		pll_count;
 	const struct eqc_pll	*plls;
 
 	unsigned int		div_count;
 	const struct eqc_div	*divs;
+
+	unsigned int			fixed_factor_count;
+	const struct eqc_fixed_factor	*fixed_factors;
 
 	const char		*reset_auxdev_name;
 	const char		*pinctrl_auxdev_name;
@@ -102,6 +116,9 @@ struct eqc_match_data {
 struct eqc_early_match_data {
 	unsigned int		early_pll_count;
 	const struct eqc_pll	*early_plls;
+
+	unsigned int			early_fixed_factor_count;
+	const struct eqc_fixed_factor	*early_fixed_factors;
 
 	/*
 	 * We want our of_xlate callback to EPROBE_DEFER instead of dev_err()
@@ -276,6 +293,35 @@ static void eqc_probe_init_divs(struct device *dev, const struct eqc_match_data 
 	}
 }
 
+static void eqc_probe_init_fixed_factors(struct device *dev,
+					 const struct eqc_match_data *data,
+					 struct clk_hw_onecell_data *cells)
+{
+	const struct eqc_fixed_factor *ff;
+	struct clk_hw *hw, *parent_hw;
+	unsigned int i;
+
+	for (i = 0; i < data->fixed_factor_count; i++) {
+		ff = &data->fixed_factors[i];
+		parent_hw = cells->hws[ff->parent];
+
+		if (IS_ERR(parent_hw)) {
+			/* Parent is in early clk provider. */
+			hw = clk_hw_register_fixed_factor_index(dev, ff->name,
+					ff->parent, 0, ff->mult, ff->div);
+		} else {
+			/* Avoid clock lookup when we already have the hw reference. */
+			hw = clk_hw_register_fixed_factor_parent_hw(dev, ff->name,
+					parent_hw, 0, ff->mult, ff->div);
+		}
+
+		cells->hws[ff->index] = hw;
+		if (IS_ERR(hw))
+			dev_warn(dev, "failed registering %s: %pe\n",
+				 ff->name, hw);
+	}
+}
+
 static void eqc_auxdev_release(struct device *dev)
 {
 	struct auxiliary_device *adev = to_auxiliary_dev(dev);
@@ -349,10 +395,11 @@ static int eqc_probe(struct platform_device *pdev)
 				 KBUILD_MODNAME, data->pinctrl_auxdev_name, ret);
 	}
 
-	if (data->pll_count + data->div_count == 0)
+	if (data->pll_count + data->div_count + data->fixed_factor_count == 0)
 		return 0; /* Zero clocks, we are done. */
 
-	clk_count = data->pll_count + data->div_count + data->early_clk_count;
+	clk_count = data->pll_count + data->div_count +
+		    data->fixed_factor_count + data->early_clk_count;
 	cells = kzalloc(struct_size(cells, hws, clk_count), GFP_KERNEL);
 	if (!cells)
 		return -ENOMEM;
@@ -367,11 +414,9 @@ static int eqc_probe(struct platform_device *pdev)
 
 	eqc_probe_init_divs(dev, data, base, cells);
 
-	/* When providing a single clock, require no cell. */
-	if (clk_count == 1)
-		return of_clk_add_hw_provider(np, of_clk_hw_simple_get, cells->hws[0]);
-	else
-		return of_clk_add_hw_provider(np, of_clk_hw_onecell_get, cells);
+	eqc_probe_init_fixed_factors(dev, data, cells);
+
+	return of_clk_add_hw_provider(np, of_clk_hw_onecell_get, cells);
 }
 
 /* Required early for GIC timer (pll-cpu) and UARTs (pll-per). */
@@ -391,6 +436,90 @@ static const struct eqc_pll eqc_eyeq5_plls[] = {
 	{ .index = EQ5C_PLL_DDR1, .name = "pll-ddr1", .reg64 = 0x074 },
 };
 
+enum {
+	/*
+	 * EQ5C_PLL_CPU children.
+	 * EQ5C_PER_OCC_PCI is the last clock exposed in dt-bindings.
+	 */
+	EQ5C_CPU_OCC = EQ5C_PER_OCC_PCI + 1,
+	EQ5C_CPU_SI_CSS0,
+	EQ5C_CPU_CPC,
+	EQ5C_CPU_CM,
+	EQ5C_CPU_MEM,
+	EQ5C_CPU_OCC_ISRAM,
+	EQ5C_CPU_ISRAM,
+	EQ5C_CPU_OCC_DBU,
+	EQ5C_CPU_SI_DBU_TP,
+
+	/*
+	 * EQ5C_PLL_VDI children.
+	 */
+	EQ5C_VDI_OCC_VDI,
+	EQ5C_VDI_VDI,
+	EQ5C_VDI_OCC_CAN_SER,
+	EQ5C_VDI_CAN_SER,
+	EQ5C_VDI_I2C_SER,
+
+	/*
+	 * EQ5C_PLL_PER children.
+	 */
+	EQ5C_PER_PERIPH,
+	EQ5C_PER_CAN,
+	EQ5C_PER_TIMER,
+	EQ5C_PER_CCF,
+	EQ5C_PER_OCC_MJPEG,
+	EQ5C_PER_HSM,
+	EQ5C_PER_MJPEG,
+	EQ5C_PER_FCMU_A,
+};
+
+static const struct eqc_fixed_factor eqc_eyeq5_early_fixed_factors[] = {
+	/* EQ5C_PLL_CPU children */
+	{ EQ5C_CPU_OCC,		"occ-cpu",	1, 1,	EQ5C_PLL_CPU },
+	{ EQ5C_CPU_SI_CSS0,	"si-css0",	1, 1,	EQ5C_CPU_OCC },
+	{ EQ5C_CPU_CORE0,	"core0",	1, 1,	EQ5C_CPU_SI_CSS0 },
+	{ EQ5C_CPU_CORE1,	"core1",	1, 1,	EQ5C_CPU_SI_CSS0 },
+	{ EQ5C_CPU_CORE2,	"core2",	1, 1,	EQ5C_CPU_SI_CSS0 },
+	{ EQ5C_CPU_CORE3,	"core3",	1, 1,	EQ5C_CPU_SI_CSS0 },
+
+	/* EQ5C_PLL_PER children */
+	{ EQ5C_PER_OCC,		"occ-periph",	1, 16,	EQ5C_PLL_PER },
+	{ EQ5C_PER_UART,	"uart",		1, 1,	EQ5C_PER_OCC },
+};
+
+static const struct eqc_fixed_factor eqc_eyeq5_fixed_factors[] = {
+	/* EQ5C_PLL_CPU children */
+	{ EQ5C_CPU_CPC,		"cpc",		1, 1,	EQ5C_CPU_SI_CSS0 },
+	{ EQ5C_CPU_CM,		"cm",		1, 1,	EQ5C_CPU_SI_CSS0 },
+	{ EQ5C_CPU_MEM,		"mem",		1, 1,	EQ5C_CPU_SI_CSS0 },
+	{ EQ5C_CPU_OCC_ISRAM,	"occ-isram",	1, 2,	EQ5C_PLL_CPU },
+	{ EQ5C_CPU_ISRAM,	"isram",	1, 1,	EQ5C_CPU_OCC_ISRAM },
+	{ EQ5C_CPU_OCC_DBU,	"occ-dbu",	1, 10,	EQ5C_PLL_CPU },
+	{ EQ5C_CPU_SI_DBU_TP,	"si-dbu-tp",	1, 1,	EQ5C_CPU_OCC_DBU },
+
+	/* EQ5C_PLL_VDI children */
+	{ EQ5C_VDI_OCC_VDI,	"occ-vdi",	1, 2,	EQ5C_PLL_VDI },
+	{ EQ5C_VDI_VDI,		"vdi",		1, 1,	EQ5C_VDI_OCC_VDI },
+	{ EQ5C_VDI_OCC_CAN_SER,	"occ-can-ser",	1, 16,	EQ5C_PLL_VDI },
+	{ EQ5C_VDI_CAN_SER,	"can-ser",	1, 1,	EQ5C_VDI_OCC_CAN_SER },
+	{ EQ5C_VDI_I2C_SER,	"i2c-ser",	1, 20,	EQ5C_PLL_VDI },
+
+	/* EQ5C_PLL_PER children */
+	{ EQ5C_PER_PERIPH,	"periph",	1, 1,	EQ5C_PER_OCC },
+	{ EQ5C_PER_CAN,		"can",		1, 1,	EQ5C_PER_OCC },
+	{ EQ5C_PER_SPI,		"spi",		1, 1,	EQ5C_PER_OCC },
+	{ EQ5C_PER_I2C,		"i2c",		1, 1,	EQ5C_PER_OCC },
+	{ EQ5C_PER_TIMER,	"timer",	1, 1,	EQ5C_PER_OCC },
+	{ EQ5C_PER_GPIO,	"gpio",		1, 1,	EQ5C_PER_OCC },
+	{ EQ5C_PER_EMMC,	"emmc-sys",	1, 10,	EQ5C_PLL_PER },
+	{ EQ5C_PER_CCF,		"ccf-ctrl",	1, 4,	EQ5C_PLL_PER },
+	{ EQ5C_PER_OCC_MJPEG,	"occ-mjpeg",	1, 2,	EQ5C_PLL_PER },
+	{ EQ5C_PER_HSM,		"hsm",		1, 1,	EQ5C_PER_OCC_MJPEG },
+	{ EQ5C_PER_MJPEG,	"mjpeg",	1, 1,	EQ5C_PER_OCC_MJPEG },
+	{ EQ5C_PER_FCMU_A,	"fcmu-a",	1, 20,	EQ5C_PLL_PER },
+	{ EQ5C_PER_OCC_PCI,	"occ-pci-sys",	1, 8,	EQ5C_PLL_PER },
+};
+
 static const struct eqc_div eqc_eyeq5_divs[] = {
 	{
 		.index = EQ5C_DIV_OSPI,
@@ -406,7 +535,11 @@ static const struct eqc_early_match_data eqc_eyeq5_early_match_data __initconst 
 	.early_pll_count	= ARRAY_SIZE(eqc_eyeq5_early_plls),
 	.early_plls		= eqc_eyeq5_early_plls,
 
-	.late_clk_count		= ARRAY_SIZE(eqc_eyeq5_plls) + ARRAY_SIZE(eqc_eyeq5_divs),
+	.early_fixed_factor_count	= ARRAY_SIZE(eqc_eyeq5_early_fixed_factors),
+	.early_fixed_factors		= eqc_eyeq5_early_fixed_factors,
+
+	.late_clk_count		= ARRAY_SIZE(eqc_eyeq5_plls) + ARRAY_SIZE(eqc_eyeq5_divs) +
+				  ARRAY_SIZE(eqc_eyeq5_fixed_factors),
 };
 
 static const struct eqc_match_data eqc_eyeq5_match_data = {
@@ -416,10 +549,14 @@ static const struct eqc_match_data eqc_eyeq5_match_data = {
 	.div_count	= ARRAY_SIZE(eqc_eyeq5_divs),
 	.divs		= eqc_eyeq5_divs,
 
+	.fixed_factor_count	= ARRAY_SIZE(eqc_eyeq5_fixed_factors),
+	.fixed_factors		= eqc_eyeq5_fixed_factors,
+
 	.reset_auxdev_name = "reset",
 	.pinctrl_auxdev_name = "pinctrl",
 
-	.early_clk_count = ARRAY_SIZE(eqc_eyeq5_early_plls),
+	.early_clk_count = ARRAY_SIZE(eqc_eyeq5_early_plls) +
+			   ARRAY_SIZE(eqc_eyeq5_early_fixed_factors),
 };
 
 static const struct eqc_pll eqc_eyeq6l_plls[] = {
@@ -558,22 +695,37 @@ builtin_platform_driver(eqc_driver);
 
 /* Required early for GIC timer. */
 static const struct eqc_pll eqc_eyeq6h_central_early_plls[] = {
-	{ .index = 0, .name = "pll-cpu", .reg64 = 0x02C },
+	{ .index = EQ6HC_CENTRAL_PLL_CPU, .name = "pll-cpu", .reg64 = 0x02C },
+};
+
+static const struct eqc_fixed_factor eqc_eyeq6h_central_early_fixed_factors[] = {
+	{ EQ6HC_CENTRAL_CPU_OCC, "occ-cpu", 1, 1, EQ6HC_CENTRAL_PLL_CPU },
 };
 
 static const struct eqc_early_match_data eqc_eyeq6h_central_early_match_data __initconst = {
 	.early_pll_count	= ARRAY_SIZE(eqc_eyeq6h_central_early_plls),
 	.early_plls		= eqc_eyeq6h_central_early_plls,
+
+	.early_fixed_factor_count = ARRAY_SIZE(eqc_eyeq6h_central_early_fixed_factors),
+	.early_fixed_factors = eqc_eyeq6h_central_early_fixed_factors,
 };
 
 /* Required early for UART. */
 static const struct eqc_pll eqc_eyeq6h_west_early_plls[] = {
-	{ .index = 0, .name = "pll-west", .reg64 = 0x074 },
+	{ .index = EQ6HC_WEST_PLL_PER, .name = "pll-west", .reg64 = 0x074 },
+};
+
+static const struct eqc_fixed_factor eqc_eyeq6h_west_early_fixed_factors[] = {
+	{ EQ6HC_WEST_PER_OCC,  "west-per-occ",  1, 10, EQ6HC_WEST_PLL_PER },
+	{ EQ6HC_WEST_PER_UART, "west-per-uart", 1, 1,  EQ6HC_WEST_PER_OCC },
 };
 
 static const struct eqc_early_match_data eqc_eyeq6h_west_early_match_data __initconst = {
 	.early_pll_count	= ARRAY_SIZE(eqc_eyeq6h_west_early_plls),
 	.early_plls		= eqc_eyeq6h_west_early_plls,
+
+	.early_fixed_factor_count = ARRAY_SIZE(eqc_eyeq6h_west_early_fixed_factors),
+	.early_fixed_factors = eqc_eyeq6h_west_early_fixed_factors,
 };
 
 static void __init eqc_early_init(struct device_node *np,
@@ -584,7 +736,8 @@ static void __init eqc_early_init(struct device_node *np,
 	void __iomem *base;
 	int ret;
 
-	clk_count = early_data->early_pll_count + early_data->late_clk_count;
+	clk_count = early_data->early_pll_count + early_data->early_fixed_factor_count +
+		    early_data->late_clk_count;
 	cells = kzalloc(struct_size(cells, hws, clk_count), GFP_KERNEL);
 	if (!cells) {
 		ret = -ENOMEM;
@@ -637,11 +790,22 @@ static void __init eqc_early_init(struct device_node *np,
 		}
 	}
 
-	/* When providing a single clock, require no cell. */
-	if (clk_count == 1)
-		ret = of_clk_add_hw_provider(np, of_clk_hw_simple_get, cells->hws[0]);
-	else
-		ret = of_clk_add_hw_provider(np, of_clk_hw_onecell_get, cells);
+	for (i = 0; i < early_data->early_fixed_factor_count; i++) {
+		const struct eqc_fixed_factor *ff = &early_data->early_fixed_factors[i];
+		struct clk_hw *parent_hw = cells->hws[ff->parent];
+		struct clk_hw *hw;
+
+		hw = clk_hw_register_fixed_factor_parent_hw(NULL, ff->name,
+				parent_hw, 0, ff->mult, ff->div);
+		cells->hws[ff->index] = hw;
+		if (IS_ERR(hw)) {
+			pr_err("failed registering %s: %pe\n", ff->name, hw);
+			ret = PTR_ERR(hw);
+			goto err;
+		}
+	}
+
+	ret = of_clk_add_hw_provider(np, of_clk_hw_onecell_get, cells);
 	if (ret) {
 		pr_err("failed registering clk provider: %d\n", ret);
 		goto err;
