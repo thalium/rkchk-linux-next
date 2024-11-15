@@ -75,6 +75,12 @@ struct io_hash_table {
 	unsigned		hash_bits;
 };
 
+struct io_mapped_region {
+	struct page		**pages;
+	void			*vmap_ptr;
+	size_t			nr_pages;
+};
+
 /*
  * Arbitrary limit, can be raised if need be
  */
@@ -318,6 +324,9 @@ struct io_ring_ctx {
 		unsigned		cq_entries;
 		struct io_ev_fd	__rcu	*io_ev_fd;
 		unsigned		cq_extra;
+
+		void			*cq_wait_arg;
+		size_t			cq_wait_size;
 	} ____cacheline_aligned_in_smp;
 
 	/*
@@ -330,14 +339,6 @@ struct io_ring_ctx {
 		atomic_t		cq_wait_nr;
 		atomic_t		cq_timeouts;
 		struct wait_queue_head	cq_wait;
-
-		/*
-		 * If registered with IORING_REGISTER_CQWAIT_REG, a single
-		 * page holds N entries, mapped in cq_wait_arg. cq_wait_index
-		 * is the maximum allowable index.
-		 */
-		struct io_uring_reg_wait	*cq_wait_arg;
-		unsigned char			cq_wait_index;
 	} ____cacheline_aligned_in_smp;
 
 	/* timeouts */
@@ -432,7 +433,8 @@ struct io_ring_ctx {
 	struct page			**ring_pages;
 	struct page			**sqe_pages;
 
-	struct page			**cq_wait_page;
+	/* used for optimised request parameter and wait argument passing  */
+	struct io_mapped_region		param_region;
 };
 
 struct io_tw_state {

@@ -2709,7 +2709,7 @@ static __cold void io_ring_ctx_free(struct io_ring_ctx *ctx)
 	io_alloc_cache_free(&ctx->msg_cache, io_msg_cache_free);
 	io_futex_cache_free(ctx);
 	io_destroy_buffers(ctx);
-	io_unregister_cqwait_reg(ctx);
+	io_free_region(ctx, &ctx->param_region);
 	mutex_unlock(&ctx->uring_lock);
 	if (ctx->sq_creds)
 		put_cred(ctx->sq_creds);
@@ -3195,16 +3195,19 @@ void __io_uring_cancel(bool cancel_all)
 static struct io_uring_reg_wait *io_get_ext_arg_reg(struct io_ring_ctx *ctx,
 			const struct io_uring_getevents_arg __user *uarg)
 {
-	struct io_uring_reg_wait *arg = READ_ONCE(ctx->cq_wait_arg);
+	unsigned long size = sizeof(struct io_uring_reg_wait);
+	unsigned long offset = (uintptr_t)uarg;
+	unsigned long end;
 
-	if (arg) {
-		unsigned int index = (unsigned int) (uintptr_t) uarg;
+	if (unlikely(offset % sizeof(long)))
+		return ERR_PTR(-EFAULT);
 
-		if (index <= ctx->cq_wait_index)
-			return arg + index;
-	}
+	/* also protects from NULL ->cq_wait_arg as the size would be 0 */
+	if (unlikely(check_add_overflow(offset, size, &end) ||
+		     end > ctx->cq_wait_size))
+		return ERR_PTR(-EFAULT);
 
-	return ERR_PTR(-EFAULT);
+	return ctx->cq_wait_arg + offset;
 }
 
 static int io_validate_ext_arg(struct io_ring_ctx *ctx, unsigned flags,
@@ -3214,12 +3217,8 @@ static int io_validate_ext_arg(struct io_ring_ctx *ctx, unsigned flags,
 
 	if (!(flags & IORING_ENTER_EXT_ARG))
 		return 0;
-
-	if (flags & IORING_ENTER_EXT_ARG_REG) {
-		if (argsz != sizeof(struct io_uring_reg_wait))
-			return -EINVAL;
-		return PTR_ERR(io_get_ext_arg_reg(ctx, argp));
-	}
+	if (flags & IORING_ENTER_EXT_ARG_REG)
+		return -EINVAL;
 	if (argsz != sizeof(arg))
 		return -EINVAL;
 	if (copy_from_user(&arg, argp, sizeof(arg)))
