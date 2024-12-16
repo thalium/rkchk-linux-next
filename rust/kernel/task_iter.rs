@@ -1,10 +1,7 @@
 //! Implement iterator for the tasks's linked list
-use core::{iter::Iterator, ptr::NonNull};
+use core::iter::Iterator;
 
-use crate::{
-    task::Task,
-    types::{ARef, AlwaysRefCounted},
-};
+use crate::{task::Task, types::ARef};
 
 /// Implement the Iterator trait for `ARef<Task>`
 pub struct TaskIter {
@@ -27,8 +24,7 @@ impl IntoIterator for ARef<Task> {
 impl Iterator for TaskIter {
     type Item = ARef<Task>;
     fn next(&mut self) -> Option<Self::Item> {
-        let next_task: *mut Task;
-        if let Some(task) = &self.task {
+        let next_task: *mut Task = if let Some(task) = &self.task {
             // We made it around the linked list
             if task.as_ptr() == self.task_origin.as_ptr() {
                 return None;
@@ -36,15 +32,28 @@ impl Iterator for TaskIter {
             // SAFETY: For the FFI call: the underlying macro
             // is safe to use and use the good synchronization macro
             // For the casting
-            next_task = unsafe { bindings::next_task(task.as_ptr() as *const _) }.cast();
+            unsafe { bindings::next_task(task.as_ptr() as *const _) }.cast()
         } else {
             // SAFETY: For the FFI call: the underlying macro
             // is safe to use and use the good synchronization macro
             // For the casting
-            next_task =
-                unsafe { bindings::next_task(self.task_origin.as_ptr() as *const _) }.cast();
+
+            unsafe { bindings::next_task(self.task_origin.as_ptr() as *const _) }.cast()
+        };
+
+        if !next_task.is_null() {
+            // SAFETY: The reference is not null and aligned according to C guaranty
+            // However it may be aliased...
+            let next_task = ARef::from(unsafe { &*next_task });
+
+            self.task = Some(next_task.clone());
+
+            Some(next_task)
+        } else {
+            None
         }
 
+        /*
         // SAFETY: The pointer is valid we just increment it's refcount
         unsafe { (*next_task).inc_ref() };
 
@@ -55,5 +64,6 @@ impl Iterator for TaskIter {
         };
         self.task = Some(next_task.clone());
         Some(next_task)
+        */
     }
 }

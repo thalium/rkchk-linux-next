@@ -30,6 +30,14 @@ pub const fn page_align(addr: usize) -> usize {
     (addr + (PAGE_SIZE - 1)) & PAGE_MASK
 }
 
+/// Round down the given number to the next multiple of `size`.
+///
+/// It is incorrect to pass an address where the previous multiple of `size` doesn't fit in a
+/// [`usize`].
+pub fn page_align_down(addr: usize, size: usize) -> usize {
+    addr - (addr % size)
+}
+
 /// A pointer to a page that owns the page allocation.
 ///
 /// # Invariants
@@ -37,6 +45,7 @@ pub const fn page_align(addr: usize) -> usize {
 /// The pointer is valid, and has ownership over the page.
 pub struct Page {
     page: NonNull<bindings::page>,
+    order: u32,
 }
 
 // SAFETY: Pages have no logic that relies on them staying on a given thread, so moving them across
@@ -78,7 +87,21 @@ impl Page {
         let page = NonNull::new(page).ok_or(AllocError)?;
         // INVARIANT: We just successfully allocated a page, so we now have ownership of the newly
         // allocated page. We transfer that ownership to the new `Page` object.
-        Ok(Self { page })
+        Ok(Self { page, order: 0 })
+    }
+
+    /// Allocate 1 << order contiguous new pages.
+    /// The physical address of the first page is naturally aligned
+    /// (eg an order-3 allocation will be aligned to a multiple of 8 * PAGE_SIZE bytes).
+    /// The NUMA policy of the current process is honoured when in process context.
+    pub fn alloc_pages(flags: Flags, order: u32) -> Result<Self, AllocError> {
+        // SAFETY: Depending on the value of `gfp_flags`, this call may sleep. Other than that, it
+        // is always safe to call this method.
+        let page = unsafe { bindings::alloc_pages(flags.as_raw(), order as _) };
+        let page = NonNull::new(page).ok_or(AllocError)?;
+        // INVARIANT: We just successfully allocated a page, so we now have ownership of the newly
+        // allocated page. We transfer that ownership to the new `Page` object.
+        Ok(Self { page, order })
     }
 
     /// Returns a raw pointer to the page.
@@ -188,6 +211,7 @@ impl Page {
     ///
     /// This method will perform bounds checks on the page offset. If `offset .. offset+len` goes
     /// outside of the page, then this call returns [`EINVAL`].
+    /// So this method only work with a write which is contained in the first page of the allocation.
     ///
     /// # Safety
     ///
@@ -201,6 +225,104 @@ impl Page {
             //
             // There caller guarantees that there is no data race.
             unsafe { ptr::copy_nonoverlapping(src, dst, len) };
+            Ok(())
+        })
+    }
+
+    fn for_each_pointer_into_page_mapped(
+        &self,
+        off: usize,
+        len: usize,
+        mut f: impl FnMut(*mut u8, usize, usize) -> Result,
+    ) -> Result {
+        let n_pages = if len % PAGE_SIZE == 0 {
+            len / PAGE_SIZE
+        } else {
+            len / PAGE_SIZE + 1
+        };
+        let off_pages = off / PAGE_SIZE;
+        let off_in_page = off % PAGE_SIZE;
+
+        let n_page_alloc = (2usize).pow(self.order);
+        let bounds_ok = n_pages <= n_page_alloc && (off_pages + n_pages) <= n_page_alloc;
+
+        if !bounds_ok {
+            return Err(EINVAL);
+        }
+
+        // We have `first_len` <= PAGE_SIZE
+        let first_len = PAGE_SIZE - off_in_page;
+        // We have `last_len` <= PAGE_SIZE
+        let last_len = (len - first_len) % PAGE_SIZE;
+
+        let mut written: usize = 0;
+
+        // We do the rest of the pages
+        for i in off_pages..off_pages + n_pages {
+            // SAFETY: `page` is valid due to the type invariants on `Page`.
+            // `page` is an array of `n_page_alloc` pages due to type invariant.
+            // We have 0 <= i < n_page_alloc due to the check realized above so the pointer is valid.
+            let mapped_addr = unsafe { bindings::kmap_local_page(self.as_ptr().add(i)) };
+
+            if i == off_pages {
+                // We have that `first_len + off_in_page == PAGE_SIZE`
+                // so `mapped_addr.add(off_in_page)` is valid for `first_len` bytes.
+                // SAFETY : We have `off_in_page` <= `PAGE_SIZE`
+                f(
+                    unsafe { (mapped_addr as *mut u8).add(off_in_page) },
+                    first_len,
+                    written,
+                )?;
+
+                written += first_len;
+            }
+            // We have n_pages >= 1 so can't underflow
+            else if i == off_pages + n_pages - 1 {
+                // We have `last_len` <= `PAGE_SIZE` and mapped_addr valid for `PAGE_SIZE` bytes
+                // so valid for `last_len` bytes
+                f(mapped_addr.cast(), last_len, written)?;
+
+                written += last_len;
+            } else {
+                // The `mapped_addr` is valid for `PAGE_SIZE` bytes
+                f(mapped_addr.cast(), PAGE_SIZE, written)?;
+
+                written += PAGE_SIZE;
+            }
+
+            // This unmaps the page mapped above.
+            //
+            // SAFETY: Since this API takes the user code as a closure, it can only be used in a manner
+            // where the pages are unmapped in reverse order. This is as required by `kunmap_local`.
+            //
+            // In other words, if this call to `kunmap_local` happens when a different page should be
+            // unmapped first, then there must necessarily be a call to `kmap_local_page` other than the
+            // call just above in `with_page_mapped` that made that possible. In this case, it is the
+            // unsafe block that wraps that other call that is incorrect.
+            unsafe { bindings::kunmap_local(mapped_addr) };
+        }
+        Ok(())
+    }
+    /// Maps each necessary pages from the allocatd pages and writes into it from the given buffer.
+    ///
+    /// This method will perform bounds checks on the offset and len asked. If `offset .. offset+len` goes
+    /// outside of the allocation range, then this call returns [`EINVAL`].
+    /// So this function also work for write spanning accross multiples pages.
+    ///
+    /// # Safety
+    ///
+    /// * Callers must ensure that `src` is valid for reading `len` bytes.
+    /// * Callers must ensure that this call does not race with a read or write to the same page
+    ///   that overlaps with this write.
+    pub unsafe fn write_raw_multiple(&self, src: *const u8, offset: usize, len: usize) -> Result {
+        self.for_each_pointer_into_page_mapped(offset, len, move |dst, page_len, written| {
+            // SAFETY: If `for_each_pointer_into_page_mapped` calls into this closure, then it has performed a
+            // bounds check and guarantees that `dst` is valid for `page_len` bytes.
+            //
+            // There caller guarantees that there is no data race.
+            // There caller guarentees that src + written is valid for reading `page_len` bytes because
+            // `for_each_pointer_into_page_mapped` guarantee that `written + page_len < len`
+            unsafe { ptr::copy_nonoverlapping(src.add(written), dst, page_len) };
             Ok(())
         })
     }
@@ -255,6 +377,6 @@ impl Page {
 impl Drop for Page {
     fn drop(&mut self) {
         // SAFETY: By the type invariants, we have ownership of the page and can free it.
-        unsafe { bindings::__free_pages(self.page.as_ptr(), 0) };
+        unsafe { bindings::__free_pages(self.page.as_ptr(), self.order) };
     }
 }
