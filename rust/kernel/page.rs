@@ -2,14 +2,17 @@
 
 //! Kernel page allocation and management.
 
+use crate::prelude::GFP_KERNEL;
 use crate::{
-    alloc::{AllocError, Flags},
+    alloc::{AllocError, Flags, KVec},
     bindings,
-    error::code::*,
-    error::Result,
+    error::{code::*, Result},
     uaccess::UserSliceReader,
 };
-use core::ptr::{self, NonNull};
+use core::{
+    ptr::{self, NonNull},
+    slice,
+};
 
 /// A bitwise shift for the page size.
 pub const PAGE_SHIFT: usize = bindings::PAGE_SHIFT as usize;
@@ -229,12 +232,13 @@ impl Page {
         })
     }
 
-    fn for_each_pointer_into_page_mapped(
+    fn for_each_pointer_into_page_mapped<T>(
         &self,
         off: usize,
         len: usize,
-        mut f: impl FnMut(*mut u8, usize, usize) -> Result,
-    ) -> Result {
+        init: T,
+        mut f: impl FnMut(T, *mut u8, usize, usize) -> Result<T>,
+    ) -> Result<T> {
         let n_pages = if len % PAGE_SIZE == 0 {
             len / PAGE_SIZE
         } else {
@@ -257,6 +261,7 @@ impl Page {
 
         let mut written: usize = 0;
 
+        let mut ret = init;
         // We do the rest of the pages
         for i in off_pages..off_pages + n_pages {
             // SAFETY: `page` is valid due to the type invariants on `Page`.
@@ -268,7 +273,8 @@ impl Page {
                 // We have that `first_len + off_in_page == PAGE_SIZE`
                 // so `mapped_addr.add(off_in_page)` is valid for `first_len` bytes.
                 // SAFETY : We have `off_in_page` <= `PAGE_SIZE`
-                f(
+                ret = f(
+                    ret,
                     unsafe { (mapped_addr as *mut u8).add(off_in_page) },
                     first_len,
                     written,
@@ -280,12 +286,12 @@ impl Page {
             else if i == off_pages + n_pages - 1 {
                 // We have `last_len` <= `PAGE_SIZE` and mapped_addr valid for `PAGE_SIZE` bytes
                 // so valid for `last_len` bytes
-                f(mapped_addr.cast(), last_len, written)?;
+                ret = f(ret, mapped_addr.cast(), last_len, written)?;
 
                 written += last_len;
             } else {
                 // The `mapped_addr` is valid for `PAGE_SIZE` bytes
-                f(mapped_addr.cast(), PAGE_SIZE, written)?;
+                ret = f(ret, mapped_addr.cast(), PAGE_SIZE, written)?;
 
                 written += PAGE_SIZE;
             }
@@ -301,7 +307,7 @@ impl Page {
             // unsafe block that wraps that other call that is incorrect.
             unsafe { bindings::kunmap_local(mapped_addr) };
         }
-        Ok(())
+        Ok(ret)
     }
     /// Maps each necessary pages from the allocatd pages and writes into it from the given buffer.
     ///
@@ -315,7 +321,7 @@ impl Page {
     /// * Callers must ensure that this call does not race with a read or write to the same page
     ///   that overlaps with this write.
     pub unsafe fn write_raw_multiple(&self, src: *const u8, offset: usize, len: usize) -> Result {
-        self.for_each_pointer_into_page_mapped(offset, len, move |dst, page_len, written| {
+        self.for_each_pointer_into_page_mapped(offset, len, (), move |_, dst, page_len, written| {
             // SAFETY: If `for_each_pointer_into_page_mapped` calls into this closure, then it has performed a
             // bounds check and guarantees that `dst` is valid for `page_len` bytes.
             //
@@ -325,6 +331,32 @@ impl Page {
             unsafe { ptr::copy_nonoverlapping(src.add(written), dst, page_len) };
             Ok(())
         })
+    }
+
+    /// Compare the multiple allocated page with a same size allocation    
+    pub unsafe fn compare_raw_multiple(
+        &self,
+        src: *const u8,
+        offset: usize,
+        len: usize,
+    ) -> Result<KVec<*const u8>> {
+        self.for_each_pointer_into_page_mapped::<KVec<*const u8>>(
+            offset,
+            len,
+            KVec::new(),
+            move |mut acc, dst, page_len, written| {
+                let src_slice = unsafe { slice::from_raw_parts(src.add(written), page_len) };
+                let dst_slice = unsafe { slice::from_raw_parts(dst, page_len) };
+
+                for (i, e_src) in src_slice.iter().enumerate() {
+                    let e_dst = unsafe { dst_slice.get_unchecked(i) };
+                    if e_dst != e_src {
+                        unsafe { acc.push(src.add(written).add(i), GFP_KERNEL)? };
+                    }
+                }
+                Ok(acc)
+            },
+        )
     }
 
     /// Maps the page and zeroes the given slice.

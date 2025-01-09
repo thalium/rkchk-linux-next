@@ -72,6 +72,7 @@ pub mod workqueue;
 pub mod fprobe;
 pub mod insn;
 pub mod module;
+pub mod pgtable;
 pub mod socket;
 pub mod task_iter;
 

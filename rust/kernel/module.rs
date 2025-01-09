@@ -3,9 +3,11 @@
 //! C headers: [`include/linux/module.h`](../../../../include/linux/module.h)
 
 use crate::alloc::allocator::Kmalloc;
-use crate::c_str;
 use crate::str::CStr;
+use crate::types::{ARef, AlwaysRefCounted, Opaque};
+use crate::{c_str, container_of};
 use core::ffi::c_ulong;
+use core::ptr::addr_of;
 use kernel::prelude::*;
 
 type OptModName = Option<KVec<u8>>;
@@ -122,4 +124,108 @@ pub fn is_kernel(addr: u64) -> bool {
 
     // Taken from `__in_kernel` in `include/asm-generic/sections.h`
     (addr >= stext && addr < end) || (addr >= init_begin && addr < init_end)
+}
+
+/// Check if the address is in the kernel's module space
+/// Using the
+#[repr(transparent)]
+pub struct Module {
+    inner: Opaque<bindings::module>,
+}
+
+impl Module {
+    /// Create a rust Module structure from a raw ptr to a C `struct module`
+    ///
+    /// # Safety
+    ///
+    /// The raw pointer should be valid, non-null, and have a non-zero refcount
+    /// i.e. it must ensure that the reference count of the C `struct module`
+    /// can't drop to zero, for the duration of this function call.    
+    pub unsafe fn get_module(module: *mut bindings::module) -> ARef<Self> {
+        unsafe { &*(module as *const Module) }.into()
+    }
+
+    /// Return a raw pointer to the inner structure
+    pub const fn as_ptr(&self) -> *mut bindings::module {
+        self.inner.get()
+    }
+
+    /// Print the name of the module
+    pub fn print_name(&self) {
+        let ptr = self.inner.get();
+
+        // SAFETY : ptr is non null, point to valid data and is aligned
+        // according to the type invariant and the C guarantees
+        let name_bytes = unsafe { addr_of!((*ptr).name) as *const i8 };
+
+        let name = unsafe { CStr::from_char_ptr(name_bytes) };
+
+        pr_info!("Module : {:?}\n", name);
+    }
+}
+
+// SAFETY: The type invariant guarantte that Module is always refcounted.
+// By the kernel API, while the refcount is not 0 the object is alive
+unsafe impl AlwaysRefCounted for Module {
+    unsafe fn dec_ref(obj: core::ptr::NonNull<Self>) {
+        // SAFETY: The safety requirement guarantee that the refcount is non null
+        unsafe { bindings::module_put(obj.as_ref().as_ptr()) }
+    }
+
+    // There is sadly no way to indicate that the inc_ref might fail
+    // We hope it never happen for the moment
+    fn inc_ref(&self) {
+        // SAFETY: The existence of a shared reference means that the refcount is not 0
+        if !unsafe { bindings::try_module_get(self.as_ptr()) } {
+            pr_alert!("Couldn't get the module!\n");
+        }
+    }
+}
+
+impl From<&ThisModule> for ARef<Module> {
+    fn from(value: &ThisModule) -> Self {
+        // SAFETY : The function will be executed in the context of ThisModule so the
+        // refcount cannot be null, and the raw pointer is non-null and valid
+        let module = unsafe { Module::get_module(value.as_ptr()) };
+
+        // We increment the reference count of the module now that we own a refcounted copy
+        module.inc_ref();
+
+        module
+    }
+}
+
+/// Iterator on all the module in the module linked list
+pub struct ModuleIter {
+    cur: Option<ARef<Module>>,
+    head: *mut bindings::list_head,
+}
+
+impl ModuleIter {
+    /// Create a new instance, this is safe because we can only read
+    pub fn new() -> Self {
+        let head = symbols_lookup_name(c_str!("modules")) as *mut bindings::list_head;
+        ModuleIter { cur: None, head }
+    }
+}
+
+impl Iterator for ModuleIter {
+    type Item = ARef<Module>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let next = match self.cur {
+            None => unsafe { &*self.head }.next,
+            Some(ref module) => unsafe { (*module.as_ptr()).list }.next,
+        };
+
+        if next == self.head {
+            None
+        } else {
+            let next_mod = unsafe { container_of!(next, bindings::module, list) as *mut _ };
+            let next_mod = unsafe { Module::get_module(next_mod) };
+            next_mod.inc_ref();
+            self.cur = Some(next_mod.clone());
+            Some(next_mod)
+        }
+    }
 }

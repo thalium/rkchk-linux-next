@@ -10,6 +10,7 @@
 // In kernel disassembler
 #include <asm/insn.h>
 #include <asm/msr-index.h>
+#include <asm/pgtable_types.h>
 #include <asm/syscall.h>
 #include <asm-generic/sections.h>
 #include <kunit/test.h>
