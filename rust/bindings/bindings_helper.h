@@ -27,6 +27,7 @@
 #include <linux/fprobe.h>
 #include <linux/fs.h>
 #include <linux/ftrace.h>
+#include <linux/stacktrace.h>
 #include <linux/jiffies.h>
 #include <linux/jump_label.h>
 #include <linux/kprobes.h>

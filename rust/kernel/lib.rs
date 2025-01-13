@@ -74,6 +74,7 @@ pub mod insn;
 pub mod module;
 pub mod pgtable;
 pub mod socket;
+pub mod stacktrace;
 pub mod task_iter;
 
 #[doc(hidden)]
