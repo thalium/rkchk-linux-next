@@ -2,6 +2,8 @@
 //!
 //! C header : [`arch/x86/include/stacktrace.h`](../../../../include/linux/stacktrace.h)
 
+use core::ops::Deref;
+
 use crate::{
     alloc::{allocator::Kmalloc, Flags, IntoIter, KVec},
     impl_has_work,
@@ -28,10 +30,10 @@ impl Stacktrace {
     }
 }
 
-impl IntoIterator for Stacktrace {
-    type IntoIter = IntoIter<u64, Kmalloc>;
-    type Item = u64;
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
+impl Deref for Stacktrace {
+    type Target = KVec<u64>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
