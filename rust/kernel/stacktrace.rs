@@ -5,13 +5,8 @@
 use core::ops::Deref;
 
 use crate::{
-    alloc::{allocator::Kmalloc, Flags, IntoIter, KVec},
-    impl_has_work,
+    alloc::{Flags, KVec},
     kernel::error::Result,
-    list::List,
-    prelude::GFP_KERNEL,
-    sync::{Arc, SpinLock},
-    workqueue::{Work, WorkItem},
 };
 
 /// Represent a captured stacktrace of the current process
@@ -22,9 +17,10 @@ impl Stacktrace {
     pub fn new(size: usize, flag: Flags) -> Result<Self> {
         let mut buf = KVec::from_elem(0u64, size, flag)?;
 
+        // SAFETY: This function save the stacktrace of the current process so it is always safe to call
         let len = unsafe { bindings::stack_trace_save(buf.as_mut_ptr(), size as _, 0) };
 
-        // SAFETY : We have by the `stack_trace_save` contract that `len<size` so `new_len<old_len`.
+        // SAFETY: We have by the `stack_trace_save` contract that `len<size` so `new_len<old_len`.
         unsafe { buf.set_len(len as _) };
         Ok(Stacktrace(buf))
     }

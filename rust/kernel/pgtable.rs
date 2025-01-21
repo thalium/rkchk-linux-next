@@ -18,7 +18,7 @@ pub trait Pgtable {
     /// Get the page property of the table entry
     fn pgprot(&self) -> pgprot_t;
     /// Set the current pgtable to the `new_pgtable`
-    /// # SAFETY :
+    /// # Safety
     ///     This call doesn't update the TLB caches, a call to `flush_tlb` should be made after this function
     ///     The new_pfn and new_pgprot should have been obtained from `pfn` and `pgprot` call of the same level page
     unsafe fn set_pgtable(&mut self, new_pfn: u64, new_pgprot: pgprot_t);
@@ -35,23 +35,23 @@ impl Pgtable for Pmd {
         bindings::PMD_ORDER
     }
     fn pfn(&self) -> u64 {
-        // SAFETY : According to the type invariant self.0 point to a valid pmd
+        // SAFETY: According to the type invariant self.0 point to a valid pmd
         let pmd = unsafe { *self.0.as_ptr() };
-        // SAFETY : Just an FFI call
+        // SAFETY: Just an FFI call
         (unsafe { bindings::pmd_pfn(pmd) }) as u64
     }
 
     fn pgprot(&self) -> pgprot_t {
-        // SAFETY : According to the type invariant self.0 point to a valid pmd
+        // SAFETY: According to the type invariant self.0 point to a valid pmd
         let pmd = unsafe { *self.0.as_ptr() };
-        // SAFETY : Just an FFI call
+        // SAFETY: Just an FFI call
         unsafe { bindings::pmd_pgprot(pmd) }
     }
 
     unsafe fn set_pgtable(&mut self, new_pfn: u64, new_pgprot: pgprot_t) {
-        // SAFETY : Just an FFI call
+        // SAFETY: Just an FFI call
         let pmd = unsafe { bindings::pfn_pmd(new_pfn, new_pgprot) };
-        // SAFETY : According to the safety ontrat of the trait function
+        // SAFETY: According to the safety ontrat of the trait function
         // we can change the value of the pmd
         unsafe { bindings::set_pmd(self.0.as_ptr(), pmd) };
     }
@@ -68,21 +68,21 @@ impl Pgtable for Pte {
         1
     }
     fn pfn(&self) -> u64 {
-        // SAFETY : According to the type invariant self.0 point to a valid pmd
+        // SAFETY: According to the type invariant self.0 point to a valid pmd
         let pte = unsafe { *self.0.as_ptr() };
-        // SAFETY : Just an FFI call
+        // SAFETY: Just an FFI call
         (unsafe { bindings::pte_pfn(pte) }) as u64
     }
     fn pgprot(&self) -> pgprot_t {
-        // SAFETY : According to the type invariant self.0 point to a valid pmd
+        // SAFETY: According to the type invariant self.0 point to a valid pmd
         let pte = unsafe { *self.0.as_ptr() };
-        // SAFETY : Just an FFI call
+        // SAFETY: Just an FFI call
         unsafe { bindings::pte_pgprot(pte) }
     }
     unsafe fn set_pgtable(&mut self, new_pfn: u64, new_pgprot: pgprot_t) {
-        // SAFETY : Just an FFI call
+        // SAFETY: Just an FFI call
         let pte = unsafe { bindings::pfn_pte(new_pfn, new_pgprot) };
-        // SAFETY : According to the safety ontrat of the trait function
+        // SAFETY: According to the safety ontrat of the trait function
         // we can change the value of the pmd
         unsafe { bindings::set_pte(self.0.as_ptr(), pte) };
     }
@@ -117,9 +117,9 @@ impl Pgtable for PageLevel {
     }
     unsafe fn set_pgtable(&mut self, new_pfn: u64, new_pgprot: pgprot_t) {
         match self {
-            // SAFETY : By the safeyt contract of this function
+            // SAFETY: By the safeyt contract of this function
             PageLevel::Pmd(pmd) => unsafe { pmd.set_pgtable(new_pfn, new_pgprot) },
-            // SAFETY : By the safeyt contract of this function
+            // SAFETY: By the safeyt contract of this function
             PageLevel::Pte(pte) => unsafe { pte.set_pgtable(new_pfn, new_pgprot) },
         }
     }
@@ -128,20 +128,20 @@ impl Pgtable for PageLevel {
 /// Lookup for the page at the address `address`
 pub fn lookup_address(address: usize) -> Result<PageLevel> {
     let mut level: u32 = 0;
-    // SAFETY : Just an FFI call, `&mut level` is not null
+    // SAFETY: Just an FFI call, `&mut level` is not null
     let ptr = unsafe { bindings::lookup_address(address as _, &mut level as *mut u32) };
     if ptr.is_null() {
         return Err(EINVAL);
     }
     match level {
         bindings::pg_level_PG_LEVEL_4K => Ok(PageLevel::Pte(Pte(
-            // SAFETY : `ptr` is not null, checked above
+            // SAFETY: `ptr` is not null, checked above
             // As the level indicate ptr point to a valid pte entry
             // according to the lookup_address contract
             unsafe { NonNull::new_unchecked(ptr) },
         ))),
         bindings::pg_level_PG_LEVEL_2M => Ok(PageLevel::Pmd(Pmd(
-            // SAFETY : `ptr` is not null, checked above
+            // SAFETY: `ptr` is not null, checked above
             // As the level indicate ptr point to a valid pmd entry
             // according to the lookup_address contract
             unsafe { NonNull::new_unchecked(ptr as *mut bindings::pmd_t) },

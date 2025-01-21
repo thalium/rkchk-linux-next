@@ -142,6 +142,7 @@ impl Module {
     /// i.e. it must ensure that the reference count of the C `struct module`
     /// can't drop to zero, for the duration of this function call.    
     pub unsafe fn get_module(module: *mut bindings::module) -> ARef<Self> {
+        // SAFETY: `bindings::module` and `Module` have the same memory representation
         unsafe { &*(module as *const Module) }.into()
     }
 
@@ -154,10 +155,13 @@ impl Module {
     pub fn print_name(&self) {
         let ptr = self.inner.get();
 
-        // SAFETY : ptr is non null, point to valid data and is aligned
+        // SAFETY: ptr is non null, point to valid data and is aligned
         // according to the type invariant and the C guarantees
         let name_bytes = unsafe { addr_of!((*ptr).name) as *const i8 };
 
+        // SAFETY: `module.name` is valid for the lifetime of the module,
+        // we hold a refcount of the module so it is valid for the duration of this call
+        // and we have that name is not null and is a constant null terminated string
         let name = unsafe { CStr::from_char_ptr(name_bytes) };
 
         pr_info!("Module : {:?}\n", name);
@@ -184,7 +188,7 @@ unsafe impl AlwaysRefCounted for Module {
 
 impl From<&ThisModule> for ARef<Module> {
     fn from(value: &ThisModule) -> Self {
-        // SAFETY : The function will be executed in the context of ThisModule so the
+        // SAFETY: The function will be executed in the context of ThisModule so the
         // refcount cannot be null, and the raw pointer is non-null and valid
         let module = unsafe { Module::get_module(value.as_ptr()) };
 
@@ -209,19 +213,31 @@ impl ModuleIter {
     }
 }
 
+impl Default for ModuleIter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Iterator for ModuleIter {
     type Item = ARef<Module>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let next = match self.cur {
+            // SAFETY: We have by the C API that `head.next` is valid
             None => unsafe { &*self.head }.next,
+            // SAFETY: We have by the C API that `list.next` is valid
+            // actually we need to hold module_mutex to guaranty this but holding
+            // a C mutex from the Rust side is not supported for now)
             Some(ref module) => unsafe { (*module.as_ptr()).list }.next,
         };
 
         if next == self.head {
             None
         } else {
+            // SAFETY: We are on the module's linked list so excepting the head they are all in `module` struct
             let next_mod = unsafe { container_of!(next, bindings::module, list) as *mut _ };
+            // SAFETY: We can always call this function
             let next_mod = unsafe { Module::get_module(next_mod) };
             next_mod.inc_ref();
             self.cur = Some(next_mod.clone());

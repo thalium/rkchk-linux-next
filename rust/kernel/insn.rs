@@ -35,7 +35,7 @@ impl Insn {
             );
         }
 
-        // SAFETY : According to the insn_init's API, insn is now initialized
+        // SAFETY: According to the insn_init's API, insn is now initialized
         let insn = unsafe { insn.assume_init() };
 
         // insn is valid and a well initialized opcode

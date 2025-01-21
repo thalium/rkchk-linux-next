@@ -270,11 +270,11 @@ impl Page {
             let mapped_addr = unsafe { bindings::kmap_local_page(self.as_ptr().add(i)) };
 
             if i == off_pages {
-                // We have that `first_len + off_in_page == PAGE_SIZE`
-                // so `mapped_addr.add(off_in_page)` is valid for `first_len` bytes.
-                // SAFETY : We have `off_in_page` <= `PAGE_SIZE`
                 ret = f(
                     ret,
+                    // SAFETY: We have `off_in_page` <= `PAGE_SIZE`
+                    // We have that `first_len + off_in_page == PAGE_SIZE`
+                    // so `mapped_addr.add(off_in_page)` is valid for `first_len` bytes.
                     unsafe { (mapped_addr as *mut u8).add(off_in_page) },
                     first_len,
                     written,
@@ -321,19 +321,25 @@ impl Page {
     /// * Callers must ensure that this call does not race with a read or write to the same page
     ///   that overlaps with this write.
     pub unsafe fn write_raw_multiple(&self, src: *const u8, offset: usize, len: usize) -> Result {
-        self.for_each_pointer_into_page_mapped(offset, len, (), move |_, dst, page_len, written| {
-            // SAFETY: If `for_each_pointer_into_page_mapped` calls into this closure, then it has performed a
-            // bounds check and guarantees that `dst` is valid for `page_len` bytes.
-            //
-            // There caller guarantees that there is no data race.
-            // There caller guarentees that src + written is valid for reading `page_len` bytes because
-            // `for_each_pointer_into_page_mapped` guarantee that `written + page_len < len`
-            unsafe { ptr::copy_nonoverlapping(src.add(written), dst, page_len) };
-            Ok(())
-        })
+        self.for_each_pointer_into_page_mapped(
+            offset,
+            len,
+            (),
+            move |(), dst, page_len, written| {
+                // SAFETY: If `for_each_pointer_into_page_mapped` calls into this closure, then it has performed a
+                // bounds check and guarantees that `dst` is valid for `page_len` bytes.
+                // There caller guarantees that there is no data race.
+                // There caller guarentees that src + written is valid for reading `page_len` bytes because
+                // `for_each_pointer_into_page_mapped` guarantee that `written + page_len < len`
+                unsafe { ptr::copy_nonoverlapping(src.add(written), dst, page_len) };
+                Ok(())
+            },
+        )
     }
 
     /// Compare the multiple allocated page with a same size allocation    
+    /// # Safety
+    ///     `src+offset` is not null and valid for `len` bytes.
     pub unsafe fn compare_raw_multiple(
         &self,
         src: *const u8,
@@ -345,12 +351,18 @@ impl Page {
             len,
             KVec::new(),
             move |mut acc, dst, page_len, written| {
+                // SAFETY: `for_each_pointer_into_page_mapped` guaranty that `src+written` is non null and valid for `page_len` bytes.
+                // As we are working with u8 the data is naturally aligned.
                 let src_slice = unsafe { slice::from_raw_parts(src.add(written), page_len) };
+                // SAFETY: `for_each_pointer_into_page_mapped` guaranty that `dst` is non null and valid for `page_len` bytes.
+                // As we are working with u8 the data is naturally aligned.
                 let dst_slice = unsafe { slice::from_raw_parts(dst, page_len) };
 
                 for (i, e_src) in src_slice.iter().enumerate() {
+                    // SAFETY: We have `i<src_slice.len() = page_len` so by the precedent safety comment `dst + i` is valid.
                     let e_dst = unsafe { dst_slice.get_unchecked(i) };
                     if e_dst != e_src {
+                        // SAFETY: By the safety requirement of the function we have that `src+written+i` don't overflow
                         unsafe { acc.push(src.add(written).add(i), GFP_KERNEL)? };
                     }
                 }
