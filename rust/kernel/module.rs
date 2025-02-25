@@ -5,13 +5,154 @@
 use crate::alloc::allocator::Kmalloc;
 use crate::str::CStr;
 use crate::types::{ARef, AlwaysRefCounted, Opaque};
-use crate::{c_str, container_of};
+use crate::{c_str, container_of, transmute};
+use bindings::KSYM_NAME_LEN;
 use core::ffi::c_ulong;
+use core::mem::transmute;
 use core::ptr::addr_of;
 use kernel::prelude::*;
 
 type OptModName = Option<KVec<u8>>;
 type OptSymName = Option<KVec<u8>>;
+
+/// Get the symbol type :
+/// - 'T' : exported text symbol
+/// - 't' : non-exported text symbol
+/// - 'D' : exported data symbol
+/// - 'd' : non-exported data symbol
+/// How to do it :
+///     First we get the symbol index (position) in the kallsyms array : get_symbol_pos
+///     Next we get the offset in the compressed stream : get_symbol_offset
+///     Finally we get the type with : kallsyms_get_symbol_type, it seems like this function as of linux 6.14-rc4 has a small bug (which never trigger but anyway this is not good)
+///     ^
+///     |
+///    This is the theory, in practice thoses symbols are either inlined or not accessible which make the process a "bit" messier  
+/*fn symbol_type() -> Result<char> {
+
+}*/
+
+pub struct SymbolInfo {
+    kallsyms_num_syms: u32,
+    kallsyms_name: *const u8,
+    kallsyms_token_index: *const u16,
+    kallsyms_token_table: *const u8,
+    kallsyms_sym_address: extern "C" fn(i32) -> u64,
+}
+
+impl SymbolInfo {
+    pub fn try_new() -> Result<Self> {
+        let kallsyms_name: *const u8 = symbols_lookup_name(c_str!("kallsyms_names")) as _;
+        if kallsyms_name.is_null() {
+            pr_err!("Couldn't find kallsyms_name symbol\n");
+            return Err(EFAULT);
+        }
+
+        let kallsyms_token_index: *const u16 =
+            symbols_lookup_name(c_str!("kallsyms_token_index")) as _;
+        if kallsyms_token_index.is_null() {
+            pr_err!("Couldn't find kallsyms_token_index symbol\n");
+            return Err(EFAULT);
+        }
+
+        let kallsyms_token_table: *const u8 =
+            symbols_lookup_name(c_str!("kallsyms_token_table")) as _;
+        if kallsyms_token_table.is_null() {
+            pr_err!("Couldn't find kallsyms_token_table symbol\n");
+            return Err(EFAULT);
+        }
+
+        let pkallsyms_num_syms: *const u32 = symbols_lookup_name(c_str!("kallsyms_num_syms")) as _;
+        if pkallsyms_num_syms.is_null() {
+            pr_err!("Couldn't find pkallsyms_num_syms symbol\n");
+            return Err(EFAULT);
+        }
+        let kallsyms_num_syms: u32 = unsafe { *pkallsyms_num_syms };
+
+        let pkallsyms_sym_address: *const () =
+            symbols_lookup_name(c_str!("kallsyms_sym_address")) as _;
+        if pkallsyms_sym_address.is_null() {
+            pr_err!("Couldn't find kallsyms_sym_address symbol\n");
+            return Err(EFAULT);
+        }
+
+        let kallsyms_sym_address = unsafe { transmute(pkallsyms_sym_address) };
+
+        Ok(SymbolInfo {
+            kallsyms_num_syms,
+            kallsyms_name,
+            kallsyms_token_index,
+            kallsyms_token_table,
+            kallsyms_sym_address,
+        })
+    }
+
+    /// Does pretty much the same thing as `kallsyms_expand_symbol()` expect it copy also the type information as I need it
+    fn expand_symbols(
+        &self,
+        mut off: usize,
+        buffer: &mut [u8; KSYM_NAME_LEN as _],
+    ) -> Result<usize> {
+        let mut data: *const u8 = self.kallsyms_name.wrapping_add(off);
+        let mut len: usize = unsafe { *data } as _;
+
+        data = data.wrapping_add(1);
+        off += 1;
+
+        // If the MSB of len is not null, this is a big symbol and the len is stored on 2 bytes
+        if len & 0x80 != 0 {
+            len = (len & 0x7F) | ((unsafe { *data } as usize) << 7);
+            data = data.wrapping_add(1);
+            off += 1;
+        }
+
+        // We update the offset with the len of the symbol to return the offset of the next symbol
+        off += len;
+
+        let mut i: usize = 0;
+
+        'outer: while len != 0 {
+            // We get a pointer to a token and we copy the token to the buffer, that way we decompress the symbol
+            let token_index = unsafe { *self.kallsyms_token_index.wrapping_add(*data as _) };
+            let mut ptoken = self.kallsyms_token_table.wrapping_add(token_index as _);
+
+            while unsafe { *ptoken } != 0 {
+                if let Some(r) = buffer.get_mut(i) {
+                    *r = unsafe { *ptoken };
+                } else {
+                    break 'outer;
+                }
+                ptoken = ptoken.wrapping_add(1);
+                i += 1;
+            }
+
+            len -= 1;
+            data = data.wrapping_add(1);
+        }
+
+        let buffer_len = buffer.len();
+
+        if let Some(r) = buffer.get_mut(i) {
+            *r = 0;
+        } else if let Some(r) = buffer.get_mut(buffer_len - 1) {
+            *r = 0;
+        }
+
+        return Ok(off);
+    }
+
+    pub fn on_each(&self, f: impl Fn(&[u8; KSYM_NAME_LEN as _], u64) -> Result<()>) -> Result<()> {
+        let mut off = 0;
+        let mut buffer = KBox::new([0_u8; KSYM_NAME_LEN as _], GFP_KERNEL)?;
+        for i in 0..self.kallsyms_num_syms {
+            off = self.expand_symbols(off, &mut buffer)?;
+
+            let address = unsafe { (self.kallsyms_sym_address)(i as _) };
+
+            f(&buffer, address);
+        }
+        Ok(())
+    }
+}
 
 /// Lookup an address for it's associated symbol
 ///

@@ -31,62 +31,7 @@ pub mod ops_flag {
     /// Prevent callback recursion at the expense of a little more overhead
     pub const FTRACE_OPS_FL_RECURSION: u32 = bindings::FTRACE_OPS_FL_RECURSION;
 }
-/*
-unsafe trait SimpleValue {
-    unsafe fn from_reg(reg: core::ffi::c_ulong) -> Self;
-}
 
-unsafe impl SimpleValue for usize {
-    unsafe fn from_reg(reg: core::ffi::c_ulong) -> Self {
-        // SAFETY: usize is of the size of a register so it's fine
-        reg as usize
-    }
-}
-unsafe impl SimpleValue for Option<&'_ CStr> {
-    /// # Safety
-    /// The register should be null or point to a NUL-terminated C string
-    /// The String should be valid long enough
-    unsafe fn from_reg(reg: core::ffi::c_ulong) -> Self {
-        // SAFETY: See the safety guard of this implem
-        if reg == 0 {
-            None
-        } else {
-            CStr::from_char_ptr(reg as *const core::ffi::c_char)
-        }
-    }
-}
-
-
-
-unsafe trait MapRegisters {
-    type Out;
-
-    unsafe fn get_value(regs: &bindings::pt_regs) -> Self::Out;
-}
-
-unsafe impl MapRegisters for extern "C" fn() {
-    type Out = ();
-
-    unsafe fn get_value(regs: &bindings::pt_regs) -> Self::Out {}
-}
-
-unsafe impl<T: SimpleValue> MapRegisters for extern "C" fn(T) {
-    type Out = (T,);
-
-    unsafe fn get_value(regs: &bindings::pt_regs) -> Self::Out {
-        (T::from_reg(regs.di),)
-    }
-}
-
-
-unsafe impl<T: SimpleValue, U: SimpleValue> MapRegisters for extern "C" fn(T, U) {
-    type Out = (T, U);
-
-    unsafe fn get_value(regs: &bindings::pt_regs) -> Self::Out {
-        (T::from_reg(regs.di), U::from_reg(regs.si))
-    }
-}
-*/
 /// Correspond to the kernel `entry_handler` and `exit_handler` function for the fprobe function
 ///
 /// You need to implement this trait each time you need a new callbacks

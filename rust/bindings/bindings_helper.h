@@ -47,6 +47,7 @@
 #include <linux/wait.h>
 #include <linux/workqueue.h>
 #include <trace/events/rust_sample.h>
+#include <linux/namei.h>
 
 #include <asm/pgtable_64_types.h>
 /* `bindgen` gets confused at certain things. */
