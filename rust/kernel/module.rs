@@ -5,7 +5,7 @@
 use crate::alloc::allocator::Kmalloc;
 use crate::str::CStr;
 use crate::types::{ARef, AlwaysRefCounted, Opaque};
-use crate::{c_str, container_of, transmute};
+use crate::{c_str, container_of};
 use bindings::KSYM_NAME_LEN;
 use core::ffi::c_ulong;
 use core::mem::transmute;
@@ -40,6 +40,7 @@ pub struct SymbolInfo {
 }
 
 impl SymbolInfo {
+    /// Create a new instance in a faillible way
     pub fn try_new() -> Result<Self> {
         let kallsyms_name: *const u8 = symbols_lookup_name(c_str!("kallsyms_names")) as _;
         if kallsyms_name.is_null() {
@@ -140,15 +141,19 @@ impl SymbolInfo {
         return Ok(off);
     }
 
+    /// Iterate over all the kernel symbols calling on each the passed closure
+    /// the furnished argument to the closure are :
+    ///     - The buffer containing the name of the symbol (prepanded with the symbol section)
+    ///     - The address of the symbol
     pub fn on_each(&self, f: impl Fn(&[u8; KSYM_NAME_LEN as _], u64) -> Result<()>) -> Result<()> {
         let mut off = 0;
         let mut buffer = KBox::new([0_u8; KSYM_NAME_LEN as _], GFP_KERNEL)?;
         for i in 0..self.kallsyms_num_syms {
             off = self.expand_symbols(off, &mut buffer)?;
 
-            let address = unsafe { (self.kallsyms_sym_address)(i as _) };
+            let address = (self.kallsyms_sym_address)(i as _);
 
-            f(&buffer, address);
+            f(&buffer, address)?;
         }
         Ok(())
     }
